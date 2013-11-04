@@ -8,12 +8,20 @@ scalaVersion in ThisBuild := "2.10.2"
 
 scalacOptions in ThisBuild ++= Seq("-deprecation", "-unchecked", "-feature")
 
+scalacOptions in (ThisBuild, Test) ++= Seq("-Yrangepos")
+
+javacOptions in ThisBuild ++= Seq("-source", "1.6", "-target", "1.6", "-Xlint:deprecation", "-Xlint:unchecked")
+
 libraryDependencies in ThisBuild ++= Seq(
-  "com.github.nscala-time" %% "nscala-time" % "0.6.0")
+  "com.github.nscala-time" %% "nscala-time" % "0.6.0",
+  "org.slf4j" % "slf4j-log4j12" % "1.7.5" % "test",
+  "org.specs2" %% "specs2" % "1.14" % "test")
 
 publishTo in ThisBuild := Some(Resolver.file("file",  new File(Path.userHome.absolutePath+"/.m2/repository")))
 
 publishMavenStyle in ThisBuild := true
+
+parallelExecution in (ThisBuild, Test) := false
 
 lazy val root = project.in(file(".")).aggregate(
   commons,
@@ -21,7 +29,7 @@ lazy val root = project.in(file(".")).aggregate(
   processCommonsHadoopScalding,
   processEnginesCommonsEvalHadoopScalding,
   processEnginesCommonsEvalScalaParamGen,
-  processEnginesCommonsEvalScalaTrainingTestSplit,
+  processEnginesCommonsEvalScalaU2ITrainingTestSplit,
   processEnginesItemRecAlgoHadoopScalding,
   processEnginesItemRecAlgoScalaMahout,
   processEnginesItemRecEvalHadoopScalding,
@@ -47,19 +55,19 @@ lazy val processCommonsHadoopScalding = project
 
 lazy val processEnginesCommonsEvalHadoopScalding = project
   .in(file("process/engines/commons/evaluations/hadoop/scalding"))
-  .aggregate(processEnginesCommonsEvalHadoopScaldingTrainingTestSplit)
-  .dependsOn(processEnginesCommonsEvalHadoopScaldingTrainingTestSplit)
+  .aggregate(processEnginesCommonsEvalHadoopScaldingU2ITrainingTestSplit)
+  .dependsOn(processEnginesCommonsEvalHadoopScaldingU2ITrainingTestSplit)
 
-lazy val processEnginesCommonsEvalHadoopScaldingTrainingTestSplit = project
-  .in(file("process/engines/commons/evaluations/hadoop/scalding/trainingtestsplit"))
+lazy val processEnginesCommonsEvalHadoopScaldingU2ITrainingTestSplit = project
+  .in(file("process/engines/commons/evaluations/hadoop/scalding/u2itrainingtestsplit"))
   .dependsOn(processCommonsHadoopScalding)
 
 lazy val processEnginesCommonsEvalScalaParamGen = project
   .in(file("process/engines/commons/evaluations/scala/paramgen"))
   .dependsOn(commons)
 
-lazy val processEnginesCommonsEvalScalaTrainingTestSplit = project
-  .in(file("process/engines/commons/evaluations/scala/trainingtestsplit"))
+lazy val processEnginesCommonsEvalScalaU2ITrainingTestSplit = project
+  .in(file("process/engines/commons/evaluations/scala/u2itrainingtestsplit"))
   .dependsOn(commons)
 
 lazy val processEnginesItemRecAlgoHadoopScalding = project

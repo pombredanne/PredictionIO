@@ -61,10 +61,10 @@ object OfflineMetricFile {
 /**
  * Training Test Set Generator Internal File
  */
-object TrainingTestSplitFile {
+object U2ITrainingTestSplitFile {
 
   def apply(rootDir: String, appId: Int, engineId: Int, evalId: Int, name: String): String =
-    BaseDir.offlineEvalDir(rootDir, appId, engineId, evalId) + "trainingtestsplit/" + name
+    BaseDir.offlineEvalDir(rootDir, appId, engineId, evalId) + "u2itrainingtestsplit/" + name
 }
 
 /*
