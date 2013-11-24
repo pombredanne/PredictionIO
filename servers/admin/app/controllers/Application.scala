@@ -14,10 +14,11 @@ import play.api.data.format.Formats._
 import play.api.data.validation.{Constraints}
 import play.api.i18n.{Messages, Lang}
 import play.api.libs.concurrent.Execution.Implicits._
-import play.api.libs.json.Json._
-import play.api.libs.json.{JsNull}
+import play.api.libs.json.Json.toJson
+import play.api.libs.json.{JsNull, JsArray, Json}
 import play.api.libs.ws.WS
 import play.api.Play.current
+import play.api.http
 
 import scala.concurrent.Await
 import scala.concurrent.duration._
@@ -57,6 +58,10 @@ object Application extends Controller {
   val itemRecScores = config.getModeldataItemRecScores()
   val itemSimScores = config.getModeldataItemSimScores()
 
+  /** PredictionIO Commons modeldata */
+  val trainingItemRecScores = config.getModeldataTrainingItemRecScores()
+  val trainingItemSimScores = config.getModeldataTrainingItemSimScores()
+
   /** PredictionIO Commons appdata */
   val appDataUsers = config.getAppdataUsers()
   val appDataItems = config.getAppdataItems()
@@ -83,8 +88,9 @@ object Application extends Controller {
   /** PredictionIO Output */
   val algoOutputSelector = new AlgoOutputSelector(algos)
 
-  /** */
+  /** misc */
   val timeFormat = DateTimeFormat.forPattern("yyyy-MM-dd hh:mm:ss a z")
+  val nameRegex = """\b[a-zA-Z][a-zA-Z0-9_-]*\b""".r
 
   /** Play Framework security */
   def username(request: RequestHeader) = request.session.get(Security.username)
@@ -424,6 +430,8 @@ object Application extends Controller {
             desc = None,
             timezone = "UTC"
           ))
+          Logger.info("Create app ID " + appid)
+
           Ok(toJson(Map(
             "id" -> appid.toString,
             "appname" -> an
@@ -446,6 +454,18 @@ object Application extends Controller {
     *     "message" : "Haven't signed in yet."
     *   }
     *
+    *   If not found:
+    *   NotFound
+    *   {
+    *     "message" : <error message>
+    *   }
+    *
+    *   If error:
+    *   InternalServerError
+    *   {
+    *     "message" : <error message>
+    *   }
+    *   
     *   If deleted successfully:
     *   Ok
     * }}}
@@ -454,19 +474,53 @@ object Application extends Controller {
     */
   def removeApp(id: Int) = withUser { user => implicit request =>
 
-    // TODO: return NotFound and error message if app is not found
+    Async {
+      apps.get(id) map { app =>
 
-    val appid = id
-    deleteApp(appid, keepSettings=false)
+        // don't delete if there is any sim eval and offline tune pending
+        val pendingSimEvals = engines.getByAppid(app.id) flatMap { eng => 
+          Helper.getSimEvalsByEngineid(eng.id).filter( x => Helper.isPendingSimEval(x) ).toList
+        }
+        //Logger.info("Pending sim evals "+ pendingSimEvals.map(x => x.id).mkString(","))
 
-    //send deleteAppDir(appid) request to scheduler
-    WS.url(settingsSchedulerUrl+"/apps/"+id+"/delete").get()
+        val pendingOfflineTunes = engines.getByAppid(app.id) flatMap { eng =>
+          offlineTunes.getByEngineid(eng.id).filter( x => Helper.isPendingOfflineTune(x) ).toList
+        }
 
-    Logger.info("Delete app ID "+appid)
-    apps.deleteByIdAndUserid(appid, user.id)
+        val deployedAlgos = engines.getByAppid(app.id) flatMap { eng =>
+          algos.getDeployedByEngineid(eng.id).toList
+        }
 
-    Ok
+        if (deployedAlgos.size != 0) {
+          concurrent.Future(Forbidden(Json.obj("message" -> s"There are deployed algorithms. Please undeploy them before delete this app.")))
+        } else if (pendingSimEvals.size != 0) {
+          concurrent.Future(Forbidden(Json.obj("message" -> 
+            "There are running simulated evaluations. Please stop and delete them before delete this app.")))
+        } else if (pendingOfflineTunes.size != 0) {
+          concurrent.Future(Forbidden(Json.obj("message" -> 
+            "There are auto-tuning algorithms. Please stop and delete them before delete this app.")))
+        } else {
 
+          val timeout = play.api.libs.concurrent.Promise.timeout("Scheduler is unreachable. Giving up.", concurrent.duration.Duration(10, concurrent.duration.MINUTES))
+
+          val delete = Helper.deleteAppScheduler(app.id)
+
+          concurrent.Future.firstCompletedOf(Seq(delete, timeout)).map {
+            case r: SimpleResult => {
+              if (r.header.status == http.Status.OK) {
+                Helper.deleteApp(id, user.id, keepSettings=false)
+              }
+              r
+            }
+            case t: String => InternalServerError(Json.obj("message" -> t))
+
+          }
+        }
+
+      } getOrElse {
+        concurrent.Future(NotFound(toJson(Map("message" -> toJson("Invalid appid.")))))
+      }
+    }
   }
 
   /** Erase appdata of this appid
@@ -490,15 +544,28 @@ object Application extends Controller {
     */
   def eraseAppData(id: Int) = withUser { user => implicit request =>
 
-    // TODO: return NotFound and error message if app is not found
+    Async {
+      apps.get(id) map { app =>
 
-    val appid = id
-    deleteApp(appid, keepSettings=true)
+        val timeout = play.api.libs.concurrent.Promise.timeout("Scheduler is unreachable. Giving up.", concurrent.duration.Duration(10, concurrent.duration.MINUTES))
 
-    //send deleteAppDir(appid) request to scheduler
-    WS.url(settingsSchedulerUrl+"/apps/"+id+"/delete").get()
+        val delete = Helper.deleteAppScheduler(app.id)
 
-    Ok
+        concurrent.Future.firstCompletedOf(Seq(delete, timeout)).map {
+          case r: SimpleResult => {
+            if (r.header.status == http.Status.OK) {
+              Helper.deleteApp(id, user.id, keepSettings=true)
+            }
+            r
+          }
+          case t: String => InternalServerError(Json.obj("message" -> t))
+
+        }
+        
+      } getOrElse {
+        concurrent.Future(NotFound(toJson(Map("message" -> toJson("Invalid appid.")))))
+      }
+    }
   }
 
   /** Returns a list of available engine infos in the system
@@ -518,34 +585,13 @@ object Application extends Controller {
     * }}}
     */
   def getEngineInfoList = Action {
-    // TODO: get these from engine info DB
-    Ok(toJson(Seq(
-      Map(
-        "id" -> "itemrec",
-        "engineinfoname" -> "Item Recommendation Engine",
-        "description" -> """
-    						<h6>Recommend interesting items to each user personally.</h6>
-				            <p>Sample Use Cases</p>
-				            <ul>
-				                <li>recommend top N items to users personally</li>
-				                <li>predict users' future preferences</li>
-				                <li>help users to discover new topics they may be interested in</li>
-				                <li>personalize content</li>
-				                <li>optimize sales</li>
-				            </ul>
-    						"""),
-      Map(
-        "id" -> "itemsim",
-        "engineinfoname" -> "Item Similarity Engine",
-        "description" -> """
-    		            	<h6>Discover similar items.</h6>
-				            <p>Sample Use Cases</p>
-				            <ul>
-				                <li>predict what else would a user like if this user likes a,
-				                    i.e. "People who like this also like...."</li>
-				                <li>automatic item grouping</li>
-				            </ul>
-    						"""))))
+    Ok(JsArray(engineInfos.getAll() map {
+      eng => Json.obj( 
+        "id" -> eng.id,
+        "engineinfoname" -> eng.name,
+        "description" -> eng.description
+        )
+    }))
   }
 
   /** Returns a list of available algo infos of a specific engine info
@@ -595,7 +641,7 @@ object Application extends Controller {
            )
 
        ))
-    } getOrElse InternalServerError(obj("message" -> "Invalid EngineInfo ID."))
+    } getOrElse InternalServerError(Json.obj("message" -> "Invalid EngineInfo ID."))
   }
 
   /** Returns a list of available metric infos of a specific engine info
@@ -605,6 +651,12 @@ object Application extends Controller {
     * JSON Parameters:
     *   None
     * JSON Response:
+    *   If the engine info id is not found:
+    *   InternalServerError
+    *   {
+    *     "message" : "Invalid EngineInfo ID."
+    *   }
+    *
     *   If found:
     *   Ok
     *   { "engineinfoname" : <the name of the engine info>,
@@ -619,24 +671,27 @@ object Application extends Controller {
     *
     * @param id the engine info id
     */
-  def getEngineInfoMetricsTypeList(id: String) = Action {
-    // TODO: return InternalServerError and error message("Invalid EngineInfo ID") 
-    //   if engine info id not found.
-    // TODO: read from DB instead of hardcode
-    Ok(toJson(
-      Map(
-        "engineinfoname" -> toJson("Item Recommendation Engine"),
-        "metricslist" -> toJson(Seq(
-								          toJson(Map(
-								            "id" -> toJson("map_k"),
-								            "metricsname" -> toJson("MAP@k"),
-								            "metricslongname" -> toJson("Mean Average Precision"),
-								            "settingfields" -> toJson(Map(
-								            					"k" -> "int"
-								            					))
-								          ))
-        						))
-      )))
+  def getEngineInfoMetricsTypeList(id: String) = Action {    
+    engineInfos.get(id) map { engInfo =>
+      val metrics = offlineEvalMetricInfos.getByEngineinfoid(engInfo.id) map { m =>
+        Json.obj(
+          "id" -> m.id,
+          "metricsname" -> m.name,
+          "metricslongname" -> m.description,
+          "settingfields" -> Json.toJson(
+            m.paramorder.map( p =>
+              (m.paramnames(p) -> "int") // TODO: param constraint type, hardcode to int now
+            ).toMap
+          )
+        )
+      }
+      Ok(Json.obj(
+        "engineinfoname" -> engInfo.name,
+        "metricslist" -> JsArray(metrics)
+      ))
+    } getOrElse {
+      InternalServerError(Json.obj("message" -> s"Invalid engineinfo ID: ${id}."))
+    }
   }
 
   /** Returns a list of available metric infos of a specific engine info
@@ -716,7 +771,7 @@ object Application extends Controller {
           } catch {
             case e: java.net.ConnectException => "runningnoscheduler"
           }
-      Ok(obj(
+      Ok(Json.obj(
         "id" -> eng.id.toString, // engine id
         "engineinfoid" -> eng.infoid,
         "appid" -> eng.appid.toString,
@@ -728,10 +783,6 @@ object Application extends Controller {
     }
 
   }
-
-
-  val supportedEngineTypes: Seq[String] = engineInfos.getAll() map { _.id }
-  val enginenameConstraint = Constraints.pattern("""\b[a-zA-Z][a-zA-Z0-9_-]*\b""".r, "constraint.enginename", "Engine names should only contain alphanumerical characters, underscores, or dashes. The first character must be an alphabet.")
 
   /** Creates an Engine
     * 
@@ -770,6 +821,9 @@ object Application extends Controller {
     * @param appid the App ID
     */
   def createEngine(appid: Int) = withUser { user => implicit request =>
+    val supportedEngineTypes: Seq[String] = engineInfos.getAll() map { _.id }
+    val enginenameConstraint = Constraints.pattern(nameRegex, "constraint.enginename", "Engine names should only contain alphanumerical characters, underscores, or dashes. The first character must be an alphabet.")
+
     val engineForm = Form(tuple(
       "appid" -> number,
       "engineinfoid" -> (text verifying("This feature will be available soon.", e => supportedEngineTypes.contains(e))),
@@ -801,6 +855,7 @@ object Application extends Controller {
           itypes = None, // NOTE: default None (means all itypes)
           settings = engineInfo.defaultsettings.map(s => (s._2.id, s._2.defaultvalue)) // TODO: depends on enginetype
         ))
+        Logger.info("Create engine ID " + engineId)
 
         // automatically create default algo
         val defaultAlgoType = engineInfo.defaultalgoinfoid
@@ -821,6 +876,7 @@ object Application extends Controller {
         )
 
         val algoId = algos.insert(defaultAlgo)
+        Logger.info("Create algo ID " + algoId)
 
         WS.url(settingsSchedulerUrl+"/users/"+user.id+"/sync").get()
 
@@ -857,20 +913,44 @@ object Application extends Controller {
     */
   def removeEngine(appid: Int, engineid: Int) = withUser { user => implicit request =>
 
-    // TODO: if No such app id or engine id
-    /*
-     *  NotFound(toJson(Map("message" -> toJson("invalid app id"))))
-     */
+    engines.get(engineid) map { eng =>
 
-    deleteEngine(engineid, keepSettings=false)
+      // don't delete if there is any sim eval and offline tune pending, or deployed algorithm
+      val pendingSimEvals = Helper.getSimEvalsByEngineid(eng.id).filter( x => Helper.isPendingSimEval(x) ).toList
+      val pendingOfflineTunes = offlineTunes.getByEngineid(eng.id).filter( x => Helper.isPendingOfflineTune(x) ).toList
+      val deployedAlgos = algos.getDeployedByEngineid(eng.id).toList
 
-    //send deleteAppDir(appid) request to scheduler
-    WS.url(s"${settingsSchedulerUrl}/apps/${appid}/engines/${engineid}/delete").get()
+      if (deployedAlgos.size != 0) {
+        val names = deployedAlgos map ( x => x.name ) mkString(",")
+        Forbidden(Json.obj("message" -> s"This engine has deployed algorithms (${names}). Please undeploy them before delete this engine."))
+      } else if (pendingSimEvals.size != 0) {
+        Forbidden(Json.obj("message" -> "There are running simulated evaluations. Please stop and delete them before delete this engine."))
+      } else if (pendingOfflineTunes.size != 0) {
+        Forbidden(Json.obj("message" -> "There are auto-tuning algorithms. Please stop and delete them before delete this engine."))
+      } else {
+        /** Deletion could take a while */
+        val timeout = play.api.libs.concurrent.Promise.timeout("Scheduler is unreachable. Giving up.", concurrent.duration.Duration(10, concurrent.duration.MINUTES))
 
-    Logger.info("Delete Engine ID "+engineid)
-    engines.deleteByIdAndAppid(engineid, appid)
+        // to scheduler: delete engine
+        val delete = Helper.deleteEngineScheduler(appid, engineid)
 
-    Ok
+        Async {
+          concurrent.Future.firstCompletedOf(Seq(delete, timeout)).map {
+            case r: SimpleResult => {
+              if (r.header.status == http.Status.OK) {
+                Helper.deleteEngine(engineid, appid, keepSettings=false)
+              }
+              r
+            }
+            case t: String => InternalServerError(Json.obj("message" -> t))
+          }
+        }
+      }
+
+    } getOrElse {
+      NotFound(Json.obj("message" -> s"Engine ID $engineid does not exist."))    
+    }
+
   }
 
   /** Returns a list of available (added but not deployed) algorithms of this engine
@@ -913,7 +993,7 @@ object Application extends Controller {
     if (!engineAlgos.hasNext) NoContent
     else
       Ok(toJson( // NOTE: only display algos which are not "deployed", nor "simeval"
-          (engineAlgos filter { algo => !((algo.status == "deployed") || (algo.status == "simeval")) } map { algo =>
+          (engineAlgos filter { Helper.isAvailableAlgo(_) } map { algo =>
            Map("id" -> algo.id.toString,
                "algoname" -> algo.name,
                "appid" -> appid.toString,
@@ -987,8 +1067,6 @@ object Application extends Controller {
     }
   }
 
-  val supportedAlgoTypes: Seq[String] = algoInfos.getAll map { _.id }
-
   /** Creates an new algorithm
     * {{{
     * POST
@@ -1036,11 +1114,13 @@ object Application extends Controller {
     /*
      *  NotFound(toJson(Map("message" -> toJson("invalid app id or engine id"))))
      */
+    val supportedAlgoTypes: Seq[String] = algoInfos.getAll map { _.id }
+    val algonameConstraint = Constraints.pattern(nameRegex, "constraint.algoname", "Algorithm names should only contain alphanumerical characters, underscores, or dashes. The first character must be an alphabet.")
 
     val createAlgoForm = Form(tuple(
       "algoinfoid" -> (nonEmptyText verifying("This feature will be available soon.", t => supportedAlgoTypes.contains(t))),
       "algoname" -> (text verifying("Please name your algo.", name => name.length > 0)
-                          verifying enginenameConstraint), // same name constraint as engine
+                          verifying algonameConstraint), // same name constraint as engine
       "appid" -> number,
       "engineid" -> number
     ) verifying("Algo name must be unique.", f => !algos.existsByEngineidAndName(f._4, f._2)))
@@ -1079,6 +1159,7 @@ object Application extends Controller {
           )
 
           val algoId = algos.insert(newAlgo)
+          Logger.info("Create algo ID " + algoId)
 
           Ok(toJson(Map(
             "id" -> algoId.toString, // algo id
@@ -1095,196 +1176,6 @@ object Application extends Controller {
 
       }
     )
-
-  }
-
-  /**
-   * delete appdata DB of this appid
-   */
-  def deleteAppData(appid: Int) = {
-    Logger.info("Delete appdata for app ID "+appid)
-    appDataUsers.deleteByAppid(appid)
-    appDataItems.deleteByAppid(appid)
-    appDataU2IActions.deleteByAppid(appid)
-  }
-
-  def deleteTrainingSetData(evalid: Int) = {
-    Logger.info("Delete training set for offline eval ID "+evalid)
-    trainingSetUsers.deleteByAppid(evalid)
-    trainingSetItems.deleteByAppid(evalid)
-    trainingSetU2IActions.deleteByAppid(evalid)
-  }
-
-  def deleteValidationSetData(evalid: Int) = {
-    Logger.info("Delete validation set for offline eval ID "+evalid)
-    validationSetUsers.deleteByAppid(evalid)
-    validationSetItems.deleteByAppid(evalid)
-    validationSetU2IActions.deleteByAppid(evalid)
-  }
-
-  def deleteTestSetData(evalid: Int) = {
-    Logger.info("Delete test set for offline eval ID "+evalid)
-    testSetUsers.deleteByAppid(evalid)
-    testSetItems.deleteByAppid(evalid)
-    testSetU2IActions.deleteByAppid(evalid)
-  }
-
-  def deleteModelData(algoid: Int) = {
-    val algoOpt = algos.get(algoid)
-    algoOpt map { algo =>
-      algoInfos.get(algo.infoid) map { algoInfo =>
-        Logger.info("Delete model data for algo ID "+algoid)
-        algoInfo.engineinfoid match {
-          case "itemrec" => itemRecScores.deleteByAlgoid(algoid)
-          case "itemsim" => itemSimScores.deleteByAlgoid(algoid)
-          case _ => throw new RuntimeException("Try to delete algo of unsupported engine type: " + algoInfo.engineinfoid)
-        }
-      } getOrElse { throw new RuntimeException("Try to delete algo of non-existing algotype: " + algo.infoid) }
-    } getOrElse { throw new RuntimeException("Try to delete non-existing algo: " + algoid) }
-  }
-
-
-  /**
-   * delete DB data under this app
-   */
-  def deleteApp(appid: Int, keepSettings: Boolean) = {
-
-    val appEngines = engines.getByAppid(appid)
-
-    appEngines foreach { eng =>
-      deleteEngine(eng.id, keepSettings)
-      if (!keepSettings) {
-        Logger.info("Delete engine ID "+eng.id)
-        engines.deleteByIdAndAppid(eng.id, appid)
-      }
-    }
-
-    deleteAppData(appid)
-  }
-
-  /**
-   * delete DB data under this engine
-   */
-  def deleteEngine(engineid: Int, keepSettings: Boolean) = {
-
-    val engineAlgos = algos.getByEngineid(engineid)
-
-    engineAlgos foreach { algo =>
-      deleteModelData(algo.id)
-      if (!keepSettings) {
-        Logger.info("Delete algo ID "+algo.id)
-        algos.delete(algo.id)
-      }
-    }
-
-    val engineOfflineEvals = offlineEvals.getByEngineid(engineid)
-
-    engineOfflineEvals foreach { eval =>
-      deleteOfflineEval(eval.id, keepSettings)
-      if (!keepSettings) {
-        Logger.info("Delete offline eval ID "+eval.id)
-        offlineEvals.delete(eval.id)
-      }
-    }
-
-    val engineOfflineTunes = offlineTunes.getByEngineid(engineid)
-
-    engineOfflineTunes foreach { tune =>
-      deleteOfflineTune(tune.id, keepSettings)
-      if (!keepSettings) {
-        Logger.info("Delete offline tune ID "+tune.id)
-        offlineTunes.delete(tune.id)
-      }
-    }
-
-  }
-
-
-  /**
-   * delete DB data under this offline eval
-   */
-  def deleteOfflineEval(evalid: Int, keepSettings: Boolean) = {
-
-    deleteTrainingSetData(evalid)
-    deleteValidationSetData(evalid)
-    deleteTestSetData(evalid)
-
-    val evalAlgos = algos.getByOfflineEvalid(evalid)
-
-    evalAlgos foreach { algo =>
-      deleteModelData(algo.id)
-      if (!keepSettings) {
-        Logger.info("Delete algo ID "+algo.id)
-        algos.delete(algo.id)
-      }
-    }
-
-    if (!keepSettings) {
-      val evalMetrics = offlineEvalMetrics.getByEvalid(evalid)
-
-      evalMetrics foreach { metric =>
-        Logger.info("Delete metric ID "+metric.id)
-        offlineEvalMetrics.delete(metric.id)
-      }
-
-      Logger.info("Delete offline eval results of offline eval ID "+evalid)
-      offlineEvalResults.deleteByEvalid(evalid)
-
-      val evalSplitters = offlineEvalSplitters.getByEvalid(evalid)
-      evalSplitters foreach { splitter =>
-        Logger.info("Delete Offline Eval Splitter ID "+splitter.id)
-        offlineEvalSplitters.delete(splitter.id)
-      }
-    }
-
-  }
-
-  /**
-   * delete DB data under this tuneid
-   */
-  def deleteOfflineTune(tuneid: Int, keepSettings: Boolean) = {
-
-    // delete paramGen
-    if (!keepSettings) {
-      val tuneParamGens = paramGens.getByTuneid(tuneid)
-      tuneParamGens foreach { gen =>
-        Logger.info("Delete ParamGen ID "+gen.id)
-        paramGens.delete(gen.id)
-      }
-    }
-
-    // delete OfflineEval
-    val tuneOfflineEvals = offlineEvals.getByTuneid(tuneid)
-
-    tuneOfflineEvals foreach { eval =>
-      deleteOfflineEval(eval.id, keepSettings)
-      if (!keepSettings) {
-        Logger.info("Delete offline eval ID "+eval.id)
-        offlineEvals.delete(eval.id)
-      }
-    }
-  }
-
-  /**
-   * stop offline tune job and remove both HDFS and DB of this OfflineTune
-   */
-  def removeOfflineTune(appid: Int, engineid: Int, id: Int) = {
-
-    offlineTunes.get(id) map { tune =>
-      /** Make sure to unset offline tune's creation time to prevent scheduler from picking up */
-      offlineTunes.update(tune.copy(createtime = None))
-
-      WS.url(s"${settingsSchedulerUrl}/apps/${appid}/engines/${engineid}/offlinetunes/${id}/stop").get()
-
-      offlineEvals.getByTuneid(id) foreach { eval =>
-        WS.url(s"${settingsSchedulerUrl}/apps/${appid}/engines/${engineid}/offlineevals/${eval.id}/delete").get()
-      }
-
-      deleteOfflineTune(id, false)
-      Logger.info("Delete offline tune ID "+id)
-      offlineTunes.delete(id)
-
-    }
 
   }
 
@@ -1311,16 +1202,49 @@ object Application extends Controller {
   def removeAvailableAlgo(appid: Int, engineid: Int, id: Int) = withUser { user => implicit request =>
 
     algos.get(id) map { algo =>
-      algo.offlinetuneid map { tuneid =>
-        removeOfflineTune(appid, engineid, tuneid)
-      }
-    }
 
-    deleteModelData(id)
-    // send the deleteAlgoDir(appid, engineid, id) request to scheduler here
-    WS.url(settingsSchedulerUrl+"/apps/"+appid+"/engines/"+engineid+"/algos/"+id+"/delete").get()
-    algos.delete(id)
-    Ok
+      /** Deletion could take a while */
+      val timeout = play.api.libs.concurrent.Promise.timeout("Scheduler is unreachable. Giving up.", concurrent.duration.Duration(10, concurrent.duration.MINUTES))
+
+      val deleteTune = algo.offlinetuneid map { tuneid =>
+        offlineTunes.get(tuneid) map { tune =>
+          /** Make sure to unset offline tune's creation time to prevent scheduler from picking up */
+          offlineTunes.update(tune.copy(createtime = None))
+
+          Helper.stopAndDeleteOfflineTuneScheduler(appid, engineid, tuneid)
+        } getOrElse {
+          concurrent.Future { Ok }
+        }
+      } getOrElse {
+        concurrent.Future { Ok }
+      }
+
+      val deleteAlgo: concurrent.Future[SimpleResult] = Helper.deleteAlgoScheduler(appid, engineid, algo.id)
+
+      val complete: concurrent.Future[SimpleResult] = concurrent.Future.reduce(Seq(deleteTune, deleteAlgo)) { (a,b) => 
+        if (a.header.status != http.Status.OK) // keep the 1st error
+          a
+        else
+          b
+      } 
+
+      Async {
+        concurrent.Future.firstCompletedOf(Seq(complete, timeout)).map {
+          case r: SimpleResult => {
+            if (r.header.status == http.Status.OK) {
+              algo.offlinetuneid map { tuneid =>
+                Helper.deleteOfflineTune(tuneid, keepSettings=false)
+              }
+              Helper.deleteAlgo(algo.id, keepSettings=false)
+            }
+            r
+          }
+          case t: String => InternalServerError(Json.obj("message" -> t))
+        }
+      }
+    } getOrElse {
+      NotFound(Json.obj("message" -> s"Algo ID $id does not exist."))
+    }
 
   }
 
@@ -1433,23 +1357,23 @@ object Application extends Controller {
     *                         ],
     *     "metricscoreiterationlist" : [
     *                                    [ { 
-    *                                        "algoautotuneid" : <tuneid algo id>,
+    *                                        "algoautotuneid" : <tuneid algo id 1>,
     *                                        "settingsstring" : <algo setting string>,
     *                                        "score" : <score of 1st iteration for this ituned algo id>
     *                                      },
     *                                      { 
-    *                                        "algoautotuneid" : <another tuneid algo id>,
+    *                                        "algoautotuneid" : <tuneid algo id 2>,
     *                                        "settingsstring" : <algo setting string>,
     *                                        "score" : <score of 1st iteration for this ituned algo id>
     *                                      }, ...
     *                                    ],
     *                                    [ { 
-    *                                        "algoautotuneid" : <tuneid algo id>,
+    *                                        "algoautotuneid" : <tuneid algo id 1>,
     *                                        "settingsstring" : <algo setting string>,
-    *                                        "score" : <score of 2n iteration for this ituned algo id>
+    *                                        "score" : <score of 2nd iteration for this ituned algo id>
     *                                      },
     *                                      { 
-    *                                        "algoautotuneid" : <another tuneid algo id>,
+    *                                        "algoautotuneid" : <tuneid algo id 2>,
     *                                        "settingsstring" : <algo setting string>,
     *                                        "score" : <score of 2nd iteration for this ituned algo id>
     *                                      }, ...
@@ -1558,6 +1482,7 @@ object Application extends Controller {
           val splitTest = ((splitter.settings("testPercent").asInstanceOf[Double])*100).toInt
           val splitMethod = if (splitter.settings("timeorder").asInstanceOf[Boolean]) "time" else "random"
           val evalIteration = tuneOfflineEvals.size // NOTE: for autotune, number of offline eval is the iteration
+          val engineinfoid = engines.get(engineid) map { _.infoid } getOrElse { "unkown-engine" }
 
           val status: String = (tune.starttime, tune.endtime) match {
             case (Some(x), Some(y)) => "completed"
@@ -1585,7 +1510,7 @@ object Application extends Controller {
               "metric" -> toJson(Map(
                           "id" -> metric.id.toString,
                           "engineid" -> engineid.toString,
-                          "engineinfoid" -> "itemrec", // TODO: hardcode now, should get this from enginedb
+                          "engineinfoid" -> engineinfoid,
                           "metricsinfoid" -> metric.infoid,
                           "metricsname" -> (offlineEvalMetricInfos.get(metric.infoid) map { _.name } getOrElse ""),
                           "settingsstring" -> map_k_displayAllParams(metric.params)
@@ -1918,45 +1843,30 @@ object Application extends Controller {
 
     // remove algo, remove metric, remove offline eval
 
-    /** Deletion of app data and model data could take a while */
-    val timeout = play.api.libs.concurrent.Promise.timeout("Scheduler is unreachable. Giving up.", concurrent.duration.Duration(10, concurrent.duration.MINUTES))
+    offlineEvals.get(id) map { oe =>
 
-    val offlineEval = offlineEvals.get(id)
-
-    offlineEval map { oe =>
       /** Make sure to unset offline eval's creation time to prevent scheduler from picking up */
       offlineEvals.update(oe.copy(createtime = None))
 
-      /** Stop any possible running jobs */
-      val stop = WS.url(s"${settingsSchedulerUrl}/apps/${appid}/engines/${engineid}/offlineevals/${id}/stop").get()
-      /** Clean up intermediate data files */
-      val delete = WS.url(s"${settingsSchedulerUrl}/apps/${appid}/engines/${engineid}/offlineevals/${id}/delete").get()
-      /** Synchronize on both scheduler actions */
-      val remove = for {
-        s <- stop
-        d <- delete
-      } yield {
-        /** Delete settings from database */
-        deleteOfflineEval(id, keepSettings=false)
-        offlineEvals.delete(id)
-      }
+      /** Deletion of app data and model data could take a while */
+      val timeout = play.api.libs.concurrent.Promise.timeout("Scheduler is unreachable. Giving up.", concurrent.duration.Duration(10, concurrent.duration.MINUTES))
 
-      /** Handle any error that might occur within the Future */
-      val complete = remove map { r =>
-        Ok(obj("message" -> s"Offline evaluation ID $id has been deleted"))
-      } recover {
-        case e: Exception => InternalServerError(obj("message" -> e.getMessage()))
-      }
+      val complete = Helper.stopAndDeleteSimEvalScheduler(appid, engineid, oe.id)
 
       /** Detect timeout (10 minutes by default) */
       Async {
         concurrent.Future.firstCompletedOf(Seq(complete, timeout)).map {
-          case r: SimpleResult => r
-          case t: String => InternalServerError(obj("message" -> t))
+          case r: SimpleResult => {
+            if (r.header.status == http.Status.OK) {
+              Helper.deleteOfflineEval(oe.id, keepSettings=false)
+            }
+            r
+          }
+          case t: String => InternalServerError(Json.obj("message" -> t))
         }
       }
     } getOrElse {
-      NotFound(obj("message" -> s"Offline evaluation ID $id does not exist"))
+      NotFound(Json.obj("message" -> s"Offline evaluation ID $id does not exist"))
     }
   }
 
@@ -2267,16 +2177,16 @@ object Application extends Controller {
     // No extra param required
     val timeout = play.api.libs.concurrent.Promise.timeout("Scheduler is unreachable. Giving up.", concurrent.duration.Duration(10, concurrent.duration.MINUTES))
     val request = WS.url(s"${settingsSchedulerUrl}/apps/${appid}/engines/${engineid}/trainoncenow").get() map { r =>
-      Ok(obj("message" -> (r.json \ "message").as[String]))
+      Ok(Json.obj("message" -> (r.json \ "message").as[String]))
     } recover {
-      case e: Exception => InternalServerError(obj("message" -> e.getMessage()))
+      case e: Exception => InternalServerError(Json.obj("message" -> e.getMessage()))
     }
 
     /** Detect timeout (10 minutes by default) */
     Async {
       concurrent.Future.firstCompletedOf(Seq(request, timeout)).map {
         case r: SimpleResult => r
-        case t: String => InternalServerError(obj("message" -> t))
+        case t: String => InternalServerError(Json.obj("message" -> t))
       }
     }
   }
