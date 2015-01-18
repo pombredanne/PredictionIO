@@ -1,68 +1,64 @@
-PredictionIO
-============
+# [PredictionIO](http://prediction.io)
 
-PredictionIO is a prediction server for building smart applications. You can make
-predictions through PredictionIO just as you would filter data using a database server.
+PredictionIO is an open source machine learning framework for developers and data scientists. It supports event collection, deployment of algorithms, evaluation, querying predictive results via REST APIs. 
 
-With PredictionIO, you can write apps
-* that predict user behaviors based on solid data science
-* using your choice of state-of-the-art machine learning algorithms
-* without worrying about scalability
+To get started, check out <http://prediction.io>!
 
-Detailed documentation is available on our
-[documentation site](http://docs.prediction.io).
-
-PredictionIO Project Website: [http://prediction.io/](http://prediction.io/).
+## Table of contents
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Bugs and feature requests](#bugs-and-feature-requests)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Community](#community)
 
 
-INSTALLATION
-============
+## Installation  
 
-Install PredictionIO from Source Code:
-http://docs.prediction.io/current/installation/index.html
+Five installation options available. 
 
-
-SUPPORT
-=======
-
-
-Forum
------
-
-https://groups.google.com/group/predictionio-user
+* [Installing PredictionIO on Linux / Mac OS X](http://docs.prediction.io/current/install/install-linux.html)
+* [Installing PredictionIO from Source Code](http://docs.prediction.io/current/install/install-sourcecode.html)
+  If you are installing from source code, it's recommended that you clone the master branch. 
+* [Launching PredictionIO on AWS](http://docs.prediction.io/current/install/launch-aws.html)
+* [Installing PredictionIO with Docker](https://github.com/mingfang/docker-predictionio) (Community contributed)
+* [Installing PredictionIO with Vagrant](https://github.com/magento-hackathon/PredictionIO-Vagrant) (Community contributed)
 
 
-Issue Tracker
--------------
+## Quick start
+[Recommendation Engine Template Quick Start](http://docs.prediction.io/current/recommendation/quickstart.html) Guide.
 
-https://predictionio.atlassian.net
+[Classification Engine Template Quick Start](http://docs.prediction.io/current/classification/quickstart.html) Guide.
 
-If you are unsure whether a behavior is an issue, bringing it up in the forum is highly encouraged.
+## Bugs and feature requests
+
+Have a bug or a feature request?  Please search for existing and closed issues on the [Community Forum](https://groups.google.com/forum/#!forum/predictionio-user). If your problem or idea is not addressed yet, [please open a new issue](https://github.com/PredictionIO/PredictionIO/issues/new).
 
 
-LICENSE
-=======
+## Documentation
 
-The goal of the server license is to require that enhancements to the
-PredictionIO core be released to the community. We promise that your client
-application, which connects to PredictionIO through SDKs or APIs, is a separate
-work. Official PredictionIO SDKs are released under Apache license, which is
-copyleft free.
+PredictionIO's documentation, included in this repo in the `docs/manual` directory, is built with [Middleman](http://middlemanapp.com/) and publicly hosted at [docs.prediction.io](http://docs.prediction.io/).
 
-PredictionIO SDKs
------------------
+Interested in helping with our documentation? Read [Contributing Documentation](http://docs.prediction.io/community/contribute-documentation/).
 
-PredictionIO supported SDKs:
-[Apache License v2.0](http://www.apache.org/licenses/LICENSE-2.0).
+[![Build Status](https://travis-ci.org/PredictionIO/PredictionIO.svg?branch=livedoc)](https://travis-ci.org/PredictionIO/PredictionIO) [![Dependency Status](https://gemnasium.com/PredictionIO/PredictionIO.svg)](https://gemnasium.com/PredictionIO/PredictionIO)
 
-PredictionIO Server
--------------------
+## Community
 
-Free Software Foundation’s
-[GNU AGPL v3.0](http://www.gnu.org/licenses/agpl-3.0.html).
+Keep track of development and community news.
 
-Documentation
--------------
+- Follow [@predictionio](https://twitter.com/predictionio) on Twitter.
+- Read and subscribe to [the Newsletter ](http://prediction.us6.list-manage1.com/subscribe?u=d8c0435d851c1310fc64c6e26&id=8c6c1b46d0).
+- Join the [Community Forum](https://groups.google.com/forum/#!forum/predictionio-user).
 
-Creative Commons
-[Attribution 3.0 Unported](http://creativecommons.org/licenses/by/3.0/).
+
+## Contributing
+
+Please read and sign the [Contributor Agreement](http://prediction.io/cla). If you have any questions, you can post on the [Contributor Forum](https://groups.google.com/forum/#!forum/predictionio-dev). 
+
+You can also list your projects on the [Community Project page](http://docs.prediction.io/current/projects.html)
+
+## License
+PredictionIO is under [Apache 2 license](http://www.apache.org/licenses/LICENSE-2.0.html).
+
+

@@ -1,0 +1,19 @@
+{
+  "id": "default",
+  "description": "Default settings",
+  "engineFactory": "org.template.similarproduct.SimilarProductEngine",
+  "datasource": {
+    "params" : {
+      "appId": 9
+    }
+  },
+  "algorithms": [
+    {
+      "name": "als",
+      "params": {
+        "rank": 10,
+        "numIterations" : 20
+      }
+    }
+  ]
+}
